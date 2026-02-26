@@ -1,0 +1,264 @@
+import calendar
+import logging
+import os
+import re
+import smtplib
+from collections import Counter
+from datetime import datetime, timezone
+from email.mime.text import MIMEText
+
+import feedparser
+import requests
+import trafilatura
+import yaml
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+def load_config(path="config.yaml"):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Config file not found: {path}")
+    with open(path, "r") as fh:
+        cfg = yaml.safe_load(fh)
+    if not isinstance(cfg, dict):
+        raise ValueError("config.yaml must contain a YAML mapping")
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Feed fetching
+# ---------------------------------------------------------------------------
+def fetch_feed_entries(feed_url):
+    logger.info(f"Fetching feed: {feed_url}")
+    feed = feedparser.parse(feed_url)
+    if feed.bozo:
+        logger.warning(f"  Feed parse warning ({feed_url}): {feed.bozo_exception}")
+    logger.info(f"  {len(feed.entries)} entries found")
+    return feed.entries
+
+
+# ---------------------------------------------------------------------------
+# Article downloading
+# ---------------------------------------------------------------------------
+_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DailyNewsBot/1.0)"}
+
+
+def fetch_article_text(url):
+    try:
+        resp = requests.get(url, timeout=15, headers=_HEADERS)
+        resp.raise_for_status()
+        text = trafilatura.extract(resp.text)
+        if not text:
+            logger.debug(f"  No text extracted from {url}")
+        return text
+    except Exception as exc:
+        logger.error(f"  Could not fetch {url}: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Ranking — recency decay:  score = 1 / (1 + days_old)
+# ---------------------------------------------------------------------------
+def recency_score(published: datetime) -> float:
+    days = (datetime.now(timezone.utc) - published).total_seconds() / 86_400
+    return 1.0 / (1.0 + days)
+
+
+# ---------------------------------------------------------------------------
+# Extractive summarisation (no external ML libraries)
+#
+# Scores each sentence by the normalised frequency of its content words,
+# then picks the top `num_sentences` in their original reading order.
+# ---------------------------------------------------------------------------
+def extractive_summary(text: str, num_sentences: int = 3) -> str:
+    if not text:
+        return ""
+
+    # Split on sentence-ending punctuation followed by whitespace
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 30]
+
+    if not sentences:
+        return text[:300].strip()
+    if len(sentences) <= num_sentences:
+        return " ".join(sentences)
+
+    # Word frequency over the whole text (content words only: ≥4 chars)
+    words = re.findall(r"\b[a-z]{4,}\b", text.lower())
+    freq = Counter(words)
+    max_freq = max(freq.values(), default=1)
+    norm_freq = {w: v / max_freq for w, v in freq.items()}
+
+    def score(sent: str) -> float:
+        ws = re.findall(r"\b[a-z]{4,}\b", sent.lower())
+        if not ws:
+            return 0.0
+        return sum(norm_freq.get(w, 0) for w in ws) / len(ws)
+
+    # Pick top-scoring sentences, then restore original reading order
+    ranked = sorted(range(len(sentences)), key=lambda i: score(sentences[i]), reverse=True)
+    top_indices = sorted(ranked[:num_sentences])
+    return " ".join(sentences[i] for i in top_indices)
+
+
+# ---------------------------------------------------------------------------
+# Email
+# ---------------------------------------------------------------------------
+def build_email_body(articles: list) -> str:
+    date_str = datetime.now().strftime("%B %d, %Y")
+    lines = [
+        f"Daily News Report — {date_str}",
+        "=" * 52,
+        "",
+    ]
+    for idx, art in enumerate(articles, 1):
+        title = art.get("title") or art["url"]
+        pub = art["published"].strftime("%Y-%m-%d %H:%M UTC")
+        summary = art.get("summary", "")
+        lines += [
+            f"{idx}. {title}",
+            f"   Published : {pub}",
+            f"   URL       : {art['url']}",
+        ]
+        if summary:
+            # Indent each line of the summary for readability
+            for line in summary.splitlines():
+                lines.append(f"   {line}")
+        lines.append("")
+    lines.append("—\nGenerated by Daily News Report Agent")
+    return "\n".join(lines)
+
+
+def send_email(subject: str, body: str, recipient: str) -> None:
+    user = os.environ.get("GMAIL_USER")
+    password = os.environ.get("GMAIL_APP_PASSWORD")
+    if not user or not password:
+        raise RuntimeError(
+            "Environment variables GMAIL_USER and GMAIL_APP_PASSWORD must be set."
+        )
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = recipient
+
+    logger.info(f"Connecting to Gmail SMTP …")
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(user, password)
+        server.send_message(msg)
+    logger.info(f"Email sent to {recipient}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def _parse_published(entry) -> datetime:
+    """Return a timezone-aware UTC datetime from a feedparser entry."""
+    for field in ("published_parsed", "updated_parsed"):
+        tp = entry.get(field)
+        if tp:
+            try:
+                return datetime.fromtimestamp(calendar.timegm(tp), tz=timezone.utc)
+            except Exception:
+                pass
+    return datetime.now(timezone.utc)
+
+
+def main():
+    # 1. Load config
+    try:
+        config = load_config()
+    except Exception as exc:
+        logger.error(f"Failed to load config: {exc}")
+        return
+
+    feeds = config.get("feeds") or []
+    if not feeds:
+        logger.error("No feeds defined in config.yaml — nothing to do.")
+        return
+
+    # 2. Collect entries, dedup by URL
+    seen_urls: set = set()
+    articles: list = []
+
+    for feed_url in feeds:
+        try:
+            entries = fetch_feed_entries(feed_url)
+        except Exception as exc:
+            logger.error(f"Skipping feed {feed_url}: {exc}")
+            continue
+
+        for entry in entries:
+            url = (entry.get("link") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            articles.append(
+                {
+                    "url": url,
+                    "title": (entry.get("title") or url).strip(),
+                    "published": _parse_published(entry),
+                }
+            )
+
+    logger.info(f"Total unique articles collected: {len(articles)}")
+
+    if not articles:
+        logger.error("No articles found across all feeds — aborting.")
+        return
+
+    # 3. Fetch full article text
+    for art in articles:
+        art["text"] = fetch_article_text(art["url"])
+
+    articles = [a for a in articles if a.get("text")]
+    logger.info(f"Articles with extractable text: {len(articles)}")
+
+    if not articles:
+        logger.error("No articles with readable text — aborting.")
+        return
+
+    # 4. Rank by recency, pick top 10
+    for art in articles:
+        art["score"] = recency_score(art["published"])
+    articles.sort(key=lambda x: x["score"], reverse=True)
+    top = articles[:10]
+    logger.info(f"Selected top {len(top)} articles")
+
+    # 5. Summarise
+    for art in top:
+        art["summary"] = extractive_summary(art["text"])
+
+    # 6. Send email
+    recipient = (config.get("email_recipient") or os.environ.get("EMAIL_RECIPIENT", "")).strip()
+    if not recipient:
+        logger.error(
+            "No email recipient — set 'email_recipient' in config.yaml or EMAIL_RECIPIENT env var."
+        )
+        return
+
+    subject = f"Daily News Report — {datetime.now().strftime('%Y-%m-%d')}"
+    body = build_email_body(top)
+
+    try:
+        send_email(subject, body, recipient)
+    except Exception as exc:
+        logger.error(f"Failed to send email: {exc}")
+
+
+if __name__ == "__main__":
+    main()

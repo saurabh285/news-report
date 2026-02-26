@@ -1,0 +1,7 @@
+# list of RSS feed URLs to aggregate
+feeds:
+  - https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml
+  - https://feeds.bbci.co.uk/news/rss.xml
+
+# optional email recipient; can also be set via EMAIL_RECIPIENT environment variable
+email_recipient: user@example.com
