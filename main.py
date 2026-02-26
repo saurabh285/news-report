@@ -307,25 +307,20 @@ def main() -> None:
         return
 
     mode = _get_mode(config)
-    logger.info(f"ai.mode = {mode!r}")
+    logger.info(f"ai.mode = {mode!r} (agent always attempted first)")
 
-    if mode in ("agent", "claude"):
-        try:
-            _run_agent_mode(config)
-            return
-        except Exception as exc:
-            logger.error(
-                f"Agent mode failed ({type(exc).__name__}: {exc}). "
-                "Falling back to free (deterministic) mode."
-            )
-        # ── Fallback ──────────────────────────────────────────────────────
-        _run_free_mode(config)
-    else:
-        if mode != "free":
-            logger.warning(
-                f"Unknown ai.mode {mode!r} — defaulting to 'free'."
-            )
-        _run_free_mode(config)
+    # Always try agent mode first, regardless of ai.mode setting.
+    # Free mode is the universal fallback when agent fails for any reason.
+    try:
+        _run_agent_mode(config)
+        return
+    except Exception as exc:
+        logger.error(
+            f"Agent mode failed ({type(exc).__name__}: {exc}). "
+            "Falling back to free (deterministic) mode."
+        )
+
+    _run_free_mode(config)
 
 
 if __name__ == "__main__":
