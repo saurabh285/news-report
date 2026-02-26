@@ -100,7 +100,7 @@ def main() -> None:
     try:
         _run_agent(config)
     except Exception as exc:
-        logger.error(f"Agent failed ({type(exc).__name__}: {exc}")
+        logger.error(f"Agent failed ({type(exc).__name__}: {exc})")
         sys.exit(1)
 
 

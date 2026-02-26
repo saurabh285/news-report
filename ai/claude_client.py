@@ -18,7 +18,10 @@ logger = logging.getLogger(__name__)
 
 # Cheapest models in preferred order.  resolve_model() falls back through
 # this list when the configured model is empty or looks invalid.
-_CHEAP_FALLBACKS: tuple = ("claude-haiku-3-5", "claude-haiku-4-5-20251001")
+# Real Anthropic model IDs, cheapest first.
+# claude-3-5-haiku-20241022  — Claude 3.5 Haiku  (cheapest, old naming convention)
+# claude-haiku-4-5-20251001  — Claude Haiku 4.5  (newer, fallback)
+_CHEAP_FALLBACKS: tuple = ("claude-3-5-haiku-20241022", "claude-haiku-4-5-20251001")
 _CHEAP_DEFAULT: str = _CHEAP_FALLBACKS[0]
 
 _DEFAULT_MAX_TOKENS = 4096
