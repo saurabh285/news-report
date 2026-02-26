@@ -36,8 +36,9 @@ jobs:
           python -m py_compile main.py
           python -m py_compile ai/__init__.py
           python -m py_compile ai/tools.py
-          python -m py_compile ai/claude_client.py
+          python -m py_compile ai/llm_client.py
           python -m py_compile ai/agent_runner.py
+          python -m py_compile ai/email_template.py
           echo "All files compiled successfully."
 
       - name: Run Daily News Report
@@ -45,9 +46,26 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-          # Optional: add ANTHROPIC_API_KEY secret to enable agent mode (ai.mode: agent)
+
+          # ── LLM provider selection ──────────────────────────────────────────
+          # Set the secret for whichever provider you want to use.
+          # The provider is auto-detected from whichever key is present.
+          # You can also set LLM_PROVIDER to force a specific one.
+
+          # Gemini (free tier, default):
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+          # Anthropic Claude (optional):
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Optional: override the Claude model at runtime (e.g. claude-haiku-3-5)
-          # Leave unset to use the model from config.yaml (default: claude-haiku-3-5)
-          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+
+          # OpenAI (optional):
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+          # Force a specific provider (optional — auto-detected if unset):
+          # LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+
+          # Force a specific model (optional — uses provider default if unset):
+          # GEMINI_MODEL:    ${{ secrets.GEMINI_MODEL }}
+          # ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+          # OPENAI_MODEL:    ${{ secrets.OPENAI_MODEL }}
         run: python main.py

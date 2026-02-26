@@ -37,15 +37,16 @@ def load_config(path: str = "config.yaml") -> dict:
     return cfg
 
 
-def _get_model(config: dict) -> str:
-    """
-    Resolve the Claude model to use.
+def _get_provider(config: dict) -> str:
+    from ai.llm_client import resolve_provider  # noqa: PLC0415
+    configured = (config.get("ai") or {}).get("provider", "")
+    return resolve_provider(configured)
 
-    Priority: ANTHROPIC_MODEL env var → config.yaml ai.model → cheap default.
-    """
-    from ai.claude_client import resolve_model  # noqa: PLC0415
+
+def _get_model(config: dict, provider: str) -> str:
+    from ai.llm_client import resolve_model  # noqa: PLC0415
     configured = (config.get("ai") or {}).get("model", "")
-    return resolve_model(configured)
+    return resolve_model(provider, configured)
 
 
 def _get_recipient(config: dict) -> str:
@@ -70,14 +71,21 @@ def _run_agent(config: dict) -> None:
             "or EMAIL_RECIPIENT env var."
         )
 
-    model = _get_model(config)
+    provider = _get_provider(config)
+    model    = _get_model(config, provider)
 
     from ai.agent_runner import run_agent        # noqa: PLC0415
     from ai.tools import send_email_html         # noqa: PLC0415
     from ai.email_template import render_html    # noqa: PLC0415
 
     max_per_feed = int((config.get("ai") or {}).get("max_per_feed", 5))
-    output = run_agent(feeds=feeds, recipient=recipient, model=model, max_per_feed=max_per_feed)
+    output = run_agent(
+        feeds=feeds,
+        recipient=recipient,
+        provider=provider,
+        model=model,
+        max_per_feed=max_per_feed,
+    )
     html   = render_html(output)
 
     result = send_email_html(

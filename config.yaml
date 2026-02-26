@@ -8,19 +8,21 @@ email_recipient: saurabh241singh@gmail.com
 
 # AI pipeline settings
 ai:
-  # mode controls which pipeline runs:
-  #   free   — deterministic extractive pipeline (default, no API key needed)
-  #   agent  — tool-calling Claude agent (requires ANTHROPIC_API_KEY);
-  #             falls back to free mode automatically on any error
-  #   claude — alias for agent
-  mode: agent
+  # LLM provider to use.
+  # Options: gemini (default, free tier), anthropic, openai
+  # Can be overridden at runtime with the LLM_PROVIDER env var.
+  # If not set, the provider is auto-detected from whichever API key is present.
+  provider: gemini
 
-  # Claude model to use in agent / claude mode.
-  # Defaults to the cheapest available Haiku model.
-  # Can be overridden at runtime with the ANTHROPIC_MODEL env var.
-  model: claude-haiku-4-5-20251001
+  # Model to use for the chosen provider.
+  # Defaults (cheapest / free tier):
+  #   gemini    → gemini-2.0-flash
+  #   anthropic → claude-haiku-4-5-20251001
+  #   openai    → gpt-4o-mini
+  # Can be overridden with GEMINI_MODEL / ANTHROPIC_MODEL / OPENAI_MODEL env vars.
+  model: gemini-2.0-flash
 
-  # Max articles forwarded to Claude per feed.
+  # Max articles forwarded to the LLM per feed.
   # Add as many feeds as you like — only the freshest N from each are used.
   # Lower = fewer tokens = cheaper. Raise to 10 for more variety.
   max_per_feed: 5

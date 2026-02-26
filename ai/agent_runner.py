@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timezone
 
 from ai import tools as T
-from ai.claude_client import call_claude
+from ai.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -143,13 +143,14 @@ def _validate_output(data: dict) -> None:
 def run_agent(
     feeds: list,
     recipient: str,
-    model: str = "claude-haiku-4-5-20251001",
+    provider: str = "gemini",
+    model: str = "gemini-2.0-flash",
     max_per_feed: int = MAX_ARTICLES_PER_FEED,
 ) -> dict:
     """
     Run the news digest pipeline and return a validated output dict.
 
-    Steps 1–3 run entirely in Python. Step 4 makes a single Claude API call.
+    Steps 1–3 run entirely in Python. Step 4 makes a single LLM API call.
 
     Parameters
     ----------
@@ -157,8 +158,10 @@ def run_agent(
         RSS feed URLs to aggregate.
     recipient : str
         Destination email address (used in the user message for context).
+    provider : str
+        LLM provider: "gemini", "anthropic", or "openai".
     model : str
-        Claude model ID.
+        Model ID appropriate for the provider.
     max_per_feed : int
         Max articles to keep per feed before dedup/rank.
 
@@ -202,8 +205,8 @@ def run_agent(
     with_text = sum(1 for a in ranked if a.get("text"))
     logger.info(f"  {with_text}/{len(ranked)} articles have extractable text")
 
-    # ── Step 4: Single Claude call to write the digest ────────────────────
-    logger.info(f"Step 4/4 — Calling Claude ({model}) to write digest")
+    # ── Step 4: Single LLM call to write the digest ───────────────────────
+    logger.info(f"Step 4/4 — Calling {provider}/{model} to write digest")
 
     elapsed = time.monotonic() - start
     if elapsed > AGENT_TIMEOUT_S:
@@ -226,26 +229,20 @@ def run_agent(
         + "\n\n".join(article_blocks)
     )
 
-    response = call_claude(
-        messages=[{"role": "user", "content": user_message}],
+    raw_text = call_llm(
+        user_message=user_message,
         system=SYSTEM_PROMPT,
+        provider=provider,
         model=model,
         max_tokens=8192,
     )
 
-    if response.stop_reason == "max_tokens":
-        raise RuntimeError(
-            "Claude hit the output token limit while writing the digest. "
-            "Try reducing max_per_feed in config.yaml."
-        )
-
-    text_parts = [b.text for b in response.content if hasattr(b, "text")]
-    output = _extract_json("\n".join(text_parts))
+    output = _extract_json(raw_text)
     _validate_output(output)
 
     elapsed = time.monotonic() - start
     logger.info(
         f"Done — {len(output['items'])} items in digest, "
-        f"{elapsed:.1f}s total, model={model}"
+        f"{elapsed:.1f}s total, provider={provider} model={model}"
     )
     return output

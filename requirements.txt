@@ -3,6 +3,10 @@ requests>=2.28
 trafilatura>=1.6
 PyYAML>=6.0
 
-# Required only for agent / claude mode (ai.mode: agent)
-# Install with: pip install anthropic
+# LLM provider packages — install whichever provider(s) you use.
+# Gemini (free tier, default):
+google-generativeai>=0.8
+# Anthropic Claude:
 anthropic>=0.25
+# OpenAI:
+openai>=1.0
