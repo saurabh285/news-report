@@ -439,6 +439,15 @@ def run_agent(
             messages.append({"role": "user", "content": tool_results})
             continue
 
+        # ── Output token limit hit ───────────────────────────────────────────
+        if stop_reason == "max_tokens":
+            raise RuntimeError(
+                "Claude hit the max_tokens output limit mid-response. "
+                "The RSS feeds may be returning too many articles. "
+                "Try reducing the number of feeds in config.yaml, or "
+                "increase max_tokens in ai/claude_client.py."
+            )
+
         # ── Unexpected stop reason ───────────────────────────────────────────
         raise RuntimeError(
             f"Unexpected stop_reason from Claude: {stop_reason!r}"

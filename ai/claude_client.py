@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _CHEAP_FALLBACKS: tuple = ("claude-haiku-4-5-20251001", "claude-sonnet-4-6")
 _CHEAP_DEFAULT: str = _CHEAP_FALLBACKS[0]
 
-_DEFAULT_MAX_TOKENS = 4096
+_DEFAULT_MAX_TOKENS = 8192   # Haiku 4.5 max output; needed for large tool-call responses
 
 
 def resolve_model(configured: str = "") -> str:
