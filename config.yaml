@@ -20,7 +20,7 @@ ai:
   #   anthropic → claude-haiku-4-5-20251001
   #   openai    → gpt-4o-mini
   # Can be overridden with GEMINI_MODEL / ANTHROPIC_MODEL / OPENAI_MODEL env vars.
-  model: gemini-2.0-flash
+  model: gemini-1.5-flash
 
   # Max articles forwarded to the LLM per feed.
   # Add as many feeds as you like — only the freshest N from each are used.

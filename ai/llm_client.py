@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Default (cheapest / free-tier) model per provider.
 _DEFAULTS: dict[str, str] = {
-    "gemini":    "gemini-2.0-flash",
+    "gemini":    "gemini-1.5-flash",
     # "anthropic": "claude-haiku-4-5-20251001",
     # "openai":    "gpt-4o-mini",
 }
@@ -180,20 +180,23 @@ def _call_gemini(user_message: str, system: str, model: str, max_tokens: int) ->
             "Get a free key at https://aistudio.google.com/apikey"
         )
     try:
-        import google.generativeai as genai  # noqa: PLC0415
+        from google import genai                # noqa: PLC0415
+        from google.genai import types          # noqa: PLC0415
     except ImportError:
         raise RuntimeError(
-            "The 'google-generativeai' package is not installed. "
-            "Run: pip install google-generativeai"
+            "The 'google-genai' package is not installed. "
+            "Run: pip install google-genai"
         )
 
-    genai.configure(api_key=api_key)
-    gen_model = genai.GenerativeModel(
-        model_name=model,
-        system_instruction=system,
-        generation_config=genai.GenerationConfig(max_output_tokens=max_tokens),
+    client   = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=model,
+        contents=user_message,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+        ),
     )
-    response = gen_model.generate_content(user_message)
     return response.text
 
 
