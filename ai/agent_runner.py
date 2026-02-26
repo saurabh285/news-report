@@ -307,7 +307,7 @@ def _validate_output(data: dict) -> None:
 def run_agent(
     feeds: list,
     recipient: str,
-    model: str = "claude-3-5-haiku-20241022",
+    model: str = "claude-haiku-4-5-20251001",
 ) -> dict:
     """
     Run the bounded agent loop and return a validated output dict.

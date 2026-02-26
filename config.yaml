@@ -18,4 +18,4 @@ ai:
   # Claude model to use in agent / claude mode.
   # Defaults to the cheapest available Haiku model.
   # Can be overridden at runtime with the ANTHROPIC_MODEL env var.
-  model: claude-3-5-haiku-20241022
+  model: claude-haiku-4-5-20251001

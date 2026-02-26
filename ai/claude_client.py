@@ -19,9 +19,12 @@ logger = logging.getLogger(__name__)
 # Cheapest models in preferred order.  resolve_model() falls back through
 # this list when the configured model is empty or looks invalid.
 # Real Anthropic model IDs, cheapest first.
-# claude-3-5-haiku-20241022  — Claude 3.5 Haiku  (cheapest, old naming convention)
-# claude-haiku-4-5-20251001  — Claude Haiku 4.5  (newer, fallback)
-_CHEAP_FALLBACKS: tuple = ("claude-3-5-haiku-20241022", "claude-haiku-4-5-20251001")
+# claude-haiku-4-5-20251001  — Claude Haiku 4.5  (cheapest currently active model)
+# claude-sonnet-4-6           — Claude Sonnet 4.6 (fallback if Haiku unavailable)
+#
+# NOTE: claude-3-5-haiku-20241022 and claude-3-haiku-20240307 were both
+# retired by Anthropic on 2026-02-19 and will return 404.
+_CHEAP_FALLBACKS: tuple = ("claude-haiku-4-5-20251001", "claude-sonnet-4-6")
 _CHEAP_DEFAULT: str = _CHEAP_FALLBACKS[0]
 
 _DEFAULT_MAX_TOKENS = 4096
