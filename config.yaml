@@ -4,4 +4,4 @@ feeds:
   - https://feeds.bbci.co.uk/news/rss.xml
 
 # optional email recipient; can also be set via EMAIL_RECIPIENT environment variable
-email_recipient: user@example.com
+email_recipient: saurabh241singh@gmail.com
