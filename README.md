@@ -1,19 +1,43 @@
 # Daily News Report Agent
 
-Automatically fetches articles from RSS feeds, picks the 10 most recent stories,
-summarises each one, and emails you a clean daily digest — no AI API required.
+Automatically fetches articles from RSS feeds, picks the 10 most recent
+stories, summarises each one, and emails you a clean daily digest.
+
+Two pipelines are available — switch between them with a single line in
+`config.yaml`:
+
+| `ai.mode` | What it does | API key needed? |
+|-----------|-------------|-----------------|
+| `free` (default) | Deterministic extractive pipeline — pure Python, no external AI | No |
+| `agent` / `claude` | Tool-calling Claude agent — richer HTML digest with themes & bullets | Yes (`ANTHROPIC_API_KEY`) |
+
+Agent mode **falls back automatically** to free mode if the API key is
+missing or if the agent errors or times out.
 
 ---
 
 ## How it works
 
+### Free mode
 1. Reads RSS feed URLs from `config.yaml`
-2. Downloads each article page and extracts readable text (via [trafilatura](https://github.com/adbar/trafilatura))
+2. Downloads each article and extracts clean text ([trafilatura](https://github.com/adbar/trafilatura))
 3. Removes duplicate articles by URL
-4. Ranks articles using a recency decay score (newest = highest score)
-5. Selects the top 10 articles
-6. Generates a 2–3 sentence extractive summary for each (pure Python, no ML needed)
-7. Sends a formatted email via Gmail SMTP
+4. Ranks articles using a recency-decay score (newest = highest)
+5. Selects the top 10
+6. Generates a 2–3 sentence extractive summary per article (pure Python, no ML)
+7. Sends a plain-text email via Gmail SMTP
+
+### Agent mode
+1. Claude receives the list of feed URLs as a goal
+2. Claude calls tools (`fetch_rss`, `fetch_article_text`, `dedupe`, `rank`) to gather and process articles
+3. Claude writes the digest (subject line, 3 recurring themes, 10 articles each with 3 bullets + *why it matters*, HTML body)
+4. The runner validates the output contract and sends an HTML email
+
+Guardrails prevent runaway API usage:
+- Max 30 tool calls per run
+- Max 40 article-text fetches
+- 5-minute wall-clock timeout
+- Any failure → automatic fallback to free mode
 
 ---
 
@@ -21,10 +45,10 @@ summarises each one, and emails you a clean daily digest — no AI API required.
 
 ### Step 1 — Install Python
 
-Download and install **Python 3.8 or later** from https://www.python.org/downloads/.
-During installation on Windows, tick **"Add Python to PATH"**.
+Download **Python 3.8 or later** from https://www.python.org/downloads/.
+On Windows, tick **"Add Python to PATH"** during installation.
 
-Verify it works by opening a terminal and running:
+Verify with:
 ```
 python --version
 ```
@@ -60,10 +84,7 @@ pip install -r requirements.txt
 
 ### Step 5 — Edit `config.yaml`
 
-Open `config.yaml` in any text editor and:
-
-1. Add or replace the RSS feed URLs under `feeds:`.
-2. Set your email address as `email_recipient`.
+Open `config.yaml` in any text editor:
 
 ```yaml
 feeds:
@@ -72,14 +93,17 @@ feeds:
   # Add as many feeds as you like
 
 email_recipient: you@example.com
+
+ai:
+  mode: free   # change to "agent" to enable Claude mode
 ```
 
 ### Step 6 — Create a Gmail App Password
 
 > Regular Gmail passwords won't work. You need an **App Password**.
 
-1. Go to your Google Account → **Security** → **2-Step Verification** (enable it if not already on).
-2. Then go to **Security** → **App passwords**.
+1. Go to your Google Account → **Security** → enable **2-Step Verification**.
+2. Then **Security** → **App passwords**.
 3. Choose app: **Mail**, device: **Other** (name it "News Agent").
 4. Copy the 16-character password shown.
 
@@ -99,61 +123,117 @@ set GMAIL_USER=your@gmail.com
 set GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 ```
 
-**Windows (PowerShell):**
-```powershell
-$env:GMAIL_USER="your@gmail.com"
-$env:GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
-```
-
-### Step 8 — Run the agent
+### Step 8 — Run
 
 ```bash
 python main.py
 ```
 
-You should see log output as it fetches feeds, downloads articles, and sends the email.
+---
+
+## Agent mode (optional)
+
+Agent mode uses the Claude API to produce a richer HTML digest with:
+- A curated subject line
+- 3 recurring **themes** across the day's stories
+- Per-article **bullet points** and a *why it matters* sentence
+- A fully formatted **HTML email**
+
+### Cheapest model
+
+By default agent mode uses **`claude-haiku-3-5`** — the cheapest Claude model
+available.  A typical daily run (10 articles, ~30 tool calls) costs only a
+few cents at Haiku pricing.
+
+The model is resolved in this priority order:
+
+| Source | How to set |
+|--------|-----------|
+| `ANTHROPIC_MODEL` env var | `export ANTHROPIC_MODEL=claude-haiku-3-5` |
+| `ai.model` in `config.yaml` | `model: claude-haiku-3-5` |
+| Built-in default | `claude-haiku-3-5` → falls back to `claude-haiku-4-5-20251001` |
+
+If `ai.model` is empty, misspelled, or missing the word "claude", a warning
+is logged and the code automatically falls back to `claude-haiku-3-5`.
+
+### What you need
+
+1. An Anthropic account and API key — sign up at https://console.anthropic.com
+2. Set the environment variable:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+3. Change `ai.mode` and `ai.model` in `config.yaml`:
+
+```yaml
+ai:
+  mode: agent
+  model: claude-haiku-3-5   # cheapest model (default)
+```
+
+4. Run as normal:
+
+```bash
+python main.py
+```
+
+To use a more capable model for higher-quality output:
+
+```yaml
+ai:
+  mode: agent
+  model: claude-sonnet-4-6   # more capable, higher cost
+```
+
+Or override at runtime without touching `config.yaml`:
+
+```bash
+export ANTHROPIC_MODEL="claude-sonnet-4-6"
+python main.py
+```
+
+### What happens if the API key is missing
+
+- If `ANTHROPIC_API_KEY` is not set **and** `ai.mode` is `free` → runs normally, no issue.
+- If `ANTHROPIC_API_KEY` is not set **and** `ai.mode` is `agent` → logs a clear error, **automatically falls back to free mode**, and still sends the digest.
+
+You can safely commit `ai.mode: agent` to your repository; the workflow will
+use free mode until you add the `ANTHROPIC_API_KEY` secret in GitHub.
+
+### GitHub Actions — adding the API key
+
+Go to your repo → **Settings → Secrets and variables → Actions** → **New repository secret**:
+
+| Secret name | Required | Value |
+|-------------|----------|-------|
+| `ANTHROPIC_API_KEY` | Yes (for agent mode) | Your Anthropic API key |
+| `ANTHROPIC_MODEL` | No | Override model, e.g. `claude-haiku-3-5` |
 
 ---
 
 ## Automate with GitHub Actions (free, runs in the cloud)
 
-The workflow file `.github/workflows/daily.yml` triggers every day at **07:00 UTC**.
+The workflow `.github/workflows/daily.yml` runs every day at **07:00 UTC**.
 
 ### Setup
 
-1. Push this repository to GitHub (if you haven't already).
+1. Push this repository to GitHub.
+2. Add secrets at **Settings → Secrets and variables → Actions**:
 
-2. Go to your repository on GitHub → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
+| Secret | Required | Value |
+|--------|----------|-------|
+| `GMAIL_USER` | Yes | Your Gmail address |
+| `GMAIL_APP_PASSWORD` | Yes | App Password from Step 6 |
+| `EMAIL_RECIPIENT` | Yes | Address to receive the digest |
+| `ANTHROPIC_API_KEY` | Only for agent mode | Your Anthropic API key |
+| `ANTHROPIC_MODEL` | No | Override model (e.g. `claude-haiku-3-5`) |
 
-3. Add these three secrets:
+3. Done. The workflow also runs a **smoke test** (`python -m py_compile`) on
+   every execution to catch import errors before the script runs.
 
-   | Secret name | Value |
-   |-------------|-------|
-   | `GMAIL_USER` | Your Gmail address |
-   | `GMAIL_APP_PASSWORD` | The App Password from Step 6 |
-   | `EMAIL_RECIPIENT` | Email address to send the report to |
-
-4. That's it! The workflow runs automatically every day.
-   You can also trigger it manually from **Actions** → **Daily News Report** → **Run workflow**.
-
----
-
-## Logging and error handling
-
-- All output is printed to the console with timestamps.
-- Feed parse errors, download failures, and SMTP errors are logged and will **not** crash the script.
-- If an article's text cannot be extracted it is skipped, so you always get the best available stories.
-
----
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `No email received` | Check `GMAIL_USER` / `GMAIL_APP_PASSWORD` are set correctly and that 2-Step Verification + App Passwords are enabled in your Google account |
-| `Feed parse warning` | The URL may be slow or temporarily unavailable — the script continues with other feeds |
-| `No articles with extractable text` | Some sites block scrapers; try adding different RSS sources in `config.yaml` |
-| Script exits immediately | Make sure `email_recipient` is set in `config.yaml` or `EMAIL_RECIPIENT` env var |
+You can trigger it manually any time via **Actions → Daily News Report → Run workflow**.
 
 ---
 
@@ -161,13 +241,18 @@ The workflow file `.github/workflows/daily.yml` triggers every day at **07:00 UT
 
 ```
 news-report/
-├── main.py                       # Main script
-├── config.yaml                   # Your feed URLs and recipient email
-├── requirements.txt              # Python dependencies
+├── main.py                        # Entry point — routes by ai.mode
+├── config.yaml                    # Feeds, recipient, ai.mode
+├── requirements.txt               # Python dependencies
+├── ai/
+│   ├── __init__.py
+│   ├── tools.py                   # fetch_rss, fetch_article_text, dedupe, rank, send_email_html
+│   ├── claude_client.py           # Anthropic Messages API wrapper
+│   └── agent_runner.py            # Bounded agent loop + output validation
 ├── .github/
 │   └── workflows/
-│       └── daily.yml             # GitHub Actions scheduled job
-└── README.md                     # This file
+│       └── daily.yml              # Cron job + smoke test
+└── README.md
 ```
 
 ---
@@ -177,8 +262,20 @@ news-report/
 | Package | Purpose |
 |---------|---------|
 | `feedparser` | Parse RSS / Atom feeds |
-| `requests` | Download article web pages |
-| `trafilatura` | Extract clean readable text from HTML |
+| `requests` | Download article pages |
+| `trafilatura` | Extract clean text from HTML |
 | `PyYAML` | Read `config.yaml` |
+| `anthropic` | Claude API client (agent mode only) |
 
-No paid APIs, no ML models, no database required.
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| No email received | Check `GMAIL_USER` / `GMAIL_APP_PASSWORD` are correct and App Passwords is enabled |
+| Feed parse warning | Feed may be slow or temporarily down — other feeds still run |
+| No articles with extractable text | Some sites block scrapers; add different RSS sources |
+| Agent mode immediately falls back | Check `ANTHROPIC_API_KEY` is set and valid |
+| `anthropic` package not found | Run `pip install anthropic` |
+| Script exits immediately | Ensure `email_recipient` is set in `config.yaml` or `EMAIL_RECIPIENT` env var |

@@ -2,3 +2,7 @@ feedparser>=6.0
 requests>=2.28
 trafilatura>=1.6
 PyYAML>=6.0
+
+# Required only for agent / claude mode (ai.mode: agent)
+# Install with: pip install anthropic
+anthropic>=0.25

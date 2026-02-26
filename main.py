@@ -1,3 +1,14 @@
+"""
+main.py — Daily News Report Agent entry point.
+
+Routing
+-------
+config.yaml → ai.mode controls which pipeline runs:
+
+  free   (default) — deterministic extractive pipeline, no API key needed.
+  claude / agent   — tool-calling Claude agent; falls back to free on any error.
+"""
+
 import calendar
 import logging
 import os
@@ -27,7 +38,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-def load_config(path="config.yaml"):
+def load_config(path: str = "config.yaml") -> dict:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config file not found: {path}")
     with open(path, "r") as fh:
@@ -37,25 +48,47 @@ def load_config(path="config.yaml"):
     return cfg
 
 
-# ---------------------------------------------------------------------------
-# Feed fetching
-# ---------------------------------------------------------------------------
-def fetch_feed_entries(feed_url):
-    logger.info(f"Fetching feed: {feed_url}")
-    feed = feedparser.parse(feed_url)
-    if feed.bozo:
-        logger.warning(f"  Feed parse warning ({feed_url}): {feed.bozo_exception}")
-    logger.info(f"  {len(feed.entries)} entries found")
-    return feed.entries
+def _get_mode(config: dict) -> str:
+    """Return normalised ai.mode value: 'free', 'claude', or 'agent'."""
+    mode = (config.get("ai") or {}).get("mode", "free")
+    return str(mode).lower().strip()
+
+
+def _get_model(config: dict) -> str:
+    """
+    Resolve the Claude model to use.
+
+    Priority: ANTHROPIC_MODEL env var → config.yaml ai.model → cheap default.
+    Delegates to ai.claude_client.resolve_model (lazy import keeps free mode
+    independent of the anthropic package).
+    """
+    from ai.claude_client import resolve_model  # noqa: PLC0415
+    configured = (config.get("ai") or {}).get("model", "")
+    return resolve_model(configured)
+
+
+def _get_recipient(config: dict) -> str:
+    return (
+        config.get("email_recipient") or os.environ.get("EMAIL_RECIPIENT", "")
+    ).strip()
 
 
 # ---------------------------------------------------------------------------
-# Article downloading
+# Free-mode helpers  (self-contained deterministic pipeline)
 # ---------------------------------------------------------------------------
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DailyNewsBot/1.0)"}
 
 
-def fetch_article_text(url):
+def _fetch_feed_entries(feed_url: str) -> list:
+    logger.info(f"Fetching feed: {feed_url}")
+    feed = feedparser.parse(feed_url)
+    if feed.bozo:
+        logger.warning(f"  Parse warning ({feed_url}): {feed.bozo_exception}")
+    logger.info(f"  {len(feed.entries)} entries")
+    return feed.entries
+
+
+def _fetch_article_text(url: str):
     try:
         resp = requests.get(url, timeout=15, headers=_HEADERS)
         resp.raise_for_status()
@@ -68,34 +101,21 @@ def fetch_article_text(url):
         return None
 
 
-# ---------------------------------------------------------------------------
-# Ranking — recency decay:  score = 1 / (1 + days_old)
-# ---------------------------------------------------------------------------
-def recency_score(published: datetime) -> float:
+def _recency_score(published: datetime) -> float:
     days = (datetime.now(timezone.utc) - published).total_seconds() / 86_400
     return 1.0 / (1.0 + days)
 
 
-# ---------------------------------------------------------------------------
-# Extractive summarisation (no external ML libraries)
-#
-# Scores each sentence by the normalised frequency of its content words,
-# then picks the top `num_sentences` in their original reading order.
-# ---------------------------------------------------------------------------
-def extractive_summary(text: str, num_sentences: int = 3) -> str:
+def _extractive_summary(text: str, num_sentences: int = 3) -> str:
     if not text:
         return ""
-
-    # Split on sentence-ending punctuation followed by whitespace
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
     sentences = [s.strip() for s in sentences if len(s.strip()) > 30]
-
     if not sentences:
         return text[:300].strip()
     if len(sentences) <= num_sentences:
         return " ".join(sentences)
 
-    # Word frequency over the whole text (content words only: ≥4 chars)
     words = re.findall(r"\b[a-z]{4,}\b", text.lower())
     freq = Counter(words)
     max_freq = max(freq.values(), default=1)
@@ -103,71 +123,14 @@ def extractive_summary(text: str, num_sentences: int = 3) -> str:
 
     def score(sent: str) -> float:
         ws = re.findall(r"\b[a-z]{4,}\b", sent.lower())
-        if not ws:
-            return 0.0
-        return sum(norm_freq.get(w, 0) for w in ws) / len(ws)
+        return sum(norm_freq.get(w, 0) for w in ws) / max(len(ws), 1)
 
-    # Pick top-scoring sentences, then restore original reading order
     ranked = sorted(range(len(sentences)), key=lambda i: score(sentences[i]), reverse=True)
     top_indices = sorted(ranked[:num_sentences])
     return " ".join(sentences[i] for i in top_indices)
 
 
-# ---------------------------------------------------------------------------
-# Email
-# ---------------------------------------------------------------------------
-def build_email_body(articles: list) -> str:
-    date_str = datetime.now().strftime("%B %d, %Y")
-    lines = [
-        f"Daily News Report — {date_str}",
-        "=" * 52,
-        "",
-    ]
-    for idx, art in enumerate(articles, 1):
-        title = art.get("title") or art["url"]
-        pub = art["published"].strftime("%Y-%m-%d %H:%M UTC")
-        summary = art.get("summary", "")
-        lines += [
-            f"{idx}. {title}",
-            f"   Published : {pub}",
-            f"   URL       : {art['url']}",
-        ]
-        if summary:
-            # Indent each line of the summary for readability
-            for line in summary.splitlines():
-                lines.append(f"   {line}")
-        lines.append("")
-    lines.append("—\nGenerated by Daily News Report Agent")
-    return "\n".join(lines)
-
-
-def send_email(subject: str, body: str, recipient: str) -> None:
-    user = os.environ.get("GMAIL_USER")
-    password = os.environ.get("GMAIL_APP_PASSWORD")
-    if not user or not password:
-        raise RuntimeError(
-            "Environment variables GMAIL_USER and GMAIL_APP_PASSWORD must be set."
-        )
-
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = user
-    msg["To"] = recipient
-
-    logger.info(f"Connecting to Gmail SMTP …")
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(user, password)
-        server.send_message(msg)
-    logger.info(f"Email sent to {recipient}")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def _parse_published(entry) -> datetime:
-    """Return a timezone-aware UTC datetime from a feedparser entry."""
     for field in ("published_parsed", "updated_parsed"):
         tp = entry.get(field)
         if tp:
@@ -178,26 +141,65 @@ def _parse_published(entry) -> datetime:
     return datetime.now(timezone.utc)
 
 
-def main():
-    # 1. Load config
-    try:
-        config = load_config()
-    except Exception as exc:
-        logger.error(f"Failed to load config: {exc}")
-        return
+def _build_plain_body(articles: list) -> str:
+    date_str = datetime.now().strftime("%B %d, %Y")
+    lines = [f"Daily News Report — {date_str}", "=" * 52, ""]
+    for idx, art in enumerate(articles, 1):
+        title = art.get("title") or art["url"]
+        pub = art["published"].strftime("%Y-%m-%d %H:%M UTC")
+        summary = art.get("summary", "")
+        lines += [
+            f"{idx}. {title}",
+            f"   Published : {pub}",
+            f"   URL       : {art['url']}",
+        ]
+        if summary:
+            for line in summary.splitlines():
+                lines.append(f"   {line}")
+        lines.append("")
+    lines.append("—\nGenerated by Daily News Report Agent")
+    return "\n".join(lines)
+
+
+def _send_plain_email(subject: str, body: str, recipient: str) -> None:
+    user = os.environ.get("GMAIL_USER")
+    password = os.environ.get("GMAIL_APP_PASSWORD")
+    if not user or not password:
+        raise RuntimeError(
+            "GMAIL_USER and GMAIL_APP_PASSWORD environment variables must be set."
+        )
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = recipient
+
+    logger.info("Connecting to Gmail SMTP …")
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(user, password)
+        server.send_message(msg)
+    logger.info(f"Email sent to {recipient}")
+
+
+# ---------------------------------------------------------------------------
+# Free-mode pipeline
+# ---------------------------------------------------------------------------
+def _run_free_mode(config: dict) -> None:
+    """Deterministic pipeline: RSS → dedup → rank → summarise → email."""
+    logger.info("Running in FREE (deterministic) mode")
 
     feeds = config.get("feeds") or []
     if not feeds:
         logger.error("No feeds defined in config.yaml — nothing to do.")
         return
 
-    # 2. Collect entries, dedup by URL
     seen_urls: set = set()
     articles: list = []
 
     for feed_url in feeds:
         try:
-            entries = fetch_feed_entries(feed_url)
+            entries = _fetch_feed_entries(feed_url)
         except Exception as exc:
             logger.error(f"Skipping feed {feed_url}: {exc}")
             continue
@@ -218,12 +220,11 @@ def main():
     logger.info(f"Total unique articles collected: {len(articles)}")
 
     if not articles:
-        logger.error("No articles found across all feeds — aborting.")
+        logger.error("No articles found — aborting.")
         return
 
-    # 3. Fetch full article text
     for art in articles:
-        art["text"] = fetch_article_text(art["url"])
+        art["text"] = _fetch_article_text(art["url"])
 
     articles = [a for a in articles if a.get("text")]
     logger.info(f"Articles with extractable text: {len(articles)}")
@@ -232,32 +233,99 @@ def main():
         logger.error("No articles with readable text — aborting.")
         return
 
-    # 4. Rank by recency, pick top 10
     for art in articles:
-        art["score"] = recency_score(art["published"])
+        art["score"] = _recency_score(art["published"])
     articles.sort(key=lambda x: x["score"], reverse=True)
     top = articles[:10]
     logger.info(f"Selected top {len(top)} articles")
 
-    # 5. Summarise
     for art in top:
-        art["summary"] = extractive_summary(art["text"])
+        art["summary"] = _extractive_summary(art["text"])
 
-    # 6. Send email
-    recipient = (config.get("email_recipient") or os.environ.get("EMAIL_RECIPIENT", "")).strip()
+    recipient = _get_recipient(config)
     if not recipient:
         logger.error(
-            "No email recipient — set 'email_recipient' in config.yaml or EMAIL_RECIPIENT env var."
+            "No email recipient — set 'email_recipient' in config.yaml "
+            "or EMAIL_RECIPIENT env var."
         )
         return
 
     subject = f"Daily News Report — {datetime.now().strftime('%Y-%m-%d')}"
-    body = build_email_body(top)
+    body = _build_plain_body(top)
 
     try:
-        send_email(subject, body, recipient)
+        _send_plain_email(subject, body, recipient)
     except Exception as exc:
         logger.error(f"Failed to send email: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Agent-mode pipeline
+# ---------------------------------------------------------------------------
+def _run_agent_mode(config: dict) -> None:
+    """Tool-calling Claude agent pipeline → HTML email."""
+    logger.info("Running in AGENT mode")
+
+    feeds = config.get("feeds") or []
+    if not feeds:
+        logger.error("No feeds defined in config.yaml — nothing to do.")
+        return
+
+    recipient = _get_recipient(config)
+    if not recipient:
+        logger.error(
+            "No email recipient — set 'email_recipient' in config.yaml "
+            "or EMAIL_RECIPIENT env var."
+        )
+        return
+
+    model = _get_model(config)
+
+    # Lazy import so free mode never requires anthropic to be installed
+    from ai.agent_runner import run_agent  # noqa: PLC0415
+    from ai.tools import send_email_html  # noqa: PLC0415
+
+    output = run_agent(feeds=feeds, recipient=recipient, model=model)
+
+    result = send_email_html(
+        subject=output["subject"],
+        html=output["html_body"],
+        to=recipient,
+    )
+    if not result["ok"]:
+        raise RuntimeError(f"send_email_html failed: {result['error']}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def main() -> None:
+    try:
+        config = load_config()
+    except Exception as exc:
+        logger.error(f"Failed to load config: {exc}")
+        return
+
+    mode = _get_mode(config)
+    logger.info(f"ai.mode = {mode!r}")
+
+    if mode in ("agent", "claude"):
+        try:
+            _run_agent_mode(config)
+            return
+        except Exception as exc:
+            logger.error(
+                f"Agent mode failed ({type(exc).__name__}: {exc}). "
+                "Falling back to free (deterministic) mode."
+            )
+        # ── Fallback ──────────────────────────────────────────────────────
+        _run_free_mode(config)
+    else:
+        if mode != "free":
+            logger.warning(
+                f"Unknown ai.mode {mode!r} — defaulting to 'free'."
+            )
+        _run_free_mode(config)
 
 
 if __name__ == "__main__":
