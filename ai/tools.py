@@ -22,7 +22,7 @@ import trafilatura
 
 logger = logging.getLogger(__name__)
 
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; DailyNewsBot/1.0)"}
+_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
 # Query parameters that carry no semantic value and should be stripped when
 # canonicalising a URL for deduplication purposes.
