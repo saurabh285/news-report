@@ -25,4 +25,4 @@ ai:
   # Max articles forwarded to the LLM per feed.
   # Add as many feeds as you like — only the freshest N from each are used.
   # Lower = fewer tokens = cheaper. Raise to 10 for more variety.
-  max_per_feed: 5
+  max_per_feed: 10

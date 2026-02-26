@@ -195,9 +195,15 @@ def _call_gemini(user_message: str, system: str, model: str, max_tokens: int) ->
         config=types.GenerateContentConfig(
             system_instruction=system,
             max_output_tokens=max_tokens,
+            response_mime_type="application/json",
         ),
     )
-    return response.text
+    try:
+        return response.text
+    except ValueError:
+        raise RuntimeError(
+            f"Gemini API returned no text. Candidates: {getattr(response, 'candidates', None)}"
+        )
 
 
 def _call_anthropic(user_message: str, system: str, model: str, max_tokens: int) -> str:

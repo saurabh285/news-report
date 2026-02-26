@@ -34,16 +34,16 @@ import re
 import time
 from datetime import datetime, timezone
 
-from ai import tools as T
-from ai.llm_client import call_llm
+from . import tools as T
+from .llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Guardrails
 # ---------------------------------------------------------------------------
-MAX_ARTICLES_PER_FEED  = 5       # articles kept per feed before dedup/rank
-MAX_ARTICLE_TEXT_CHARS = 7_000   # characters of article body sent to Claude
+MAX_ARTICLES_PER_FEED  = 10      # articles kept per feed before dedup/rank
+MAX_ARTICLE_TEXT_CHARS = 2_000   # characters of article body sent to LLM
 AGENT_TIMEOUT_S        = 300     # wall-clock timeout for the whole run
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ def _extract_json(text: str) -> dict:
 
     raise ValueError(
         "Claude's response did not contain a valid JSON object.\n"
-        f"Preview: {text[:300]!r}"
+        f"Preview: {repr(text[:300])}"  # type: ignore
     )
 
 
@@ -199,7 +199,7 @@ def run_agent(
         result = T.fetch_article_text(art["url"])
         text   = result.get("text") or ""
         if len(text) > MAX_ARTICLE_TEXT_CHARS:
-            text = text[:MAX_ARTICLE_TEXT_CHARS] + " … [truncated]"
+            text = text[:MAX_ARTICLE_TEXT_CHARS] + " … [truncated]"  # type: ignore
         art["text"] = text
 
     with_text = sum(1 for a in ranked if a.get("text"))
