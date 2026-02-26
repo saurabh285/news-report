@@ -45,6 +45,12 @@ MAX_TOOL_CALLS = 30
 MAX_ARTICLES_TO_FETCH = 40
 AGENT_TIMEOUT_S = 300  # 5 minutes
 
+# How many articles to return per RSS feed.  Keeping this small prevents
+# Claude's tool-call responses from blowing the output token limit when many
+# feeds are configured.  Users can add as many feeds as they like; only the
+# freshest N articles from each feed are forwarded to Claude.
+MAX_ARTICLES_PER_FEED = 2
+
 # Article text is truncated to this many characters before being returned to
 # Claude.  Keeping this well below 8 000 chars keeps per-call token costs low
 # while still giving the model enough context to write meaningful bullets.
@@ -185,11 +191,15 @@ Rules:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _execute_tool(name: str, args: dict, article_fetch_count: list) -> str:
+def _execute_tool(name: str, args: dict, article_fetch_count: list,
+                  max_per_feed: int = MAX_ARTICLES_PER_FEED) -> str:
     """Dispatch a tool call and return the result serialised as a JSON string."""
     try:
         if name == "fetch_rss":
             result = T.fetch_rss(args["source_url"])
+            if len(result) > max_per_feed:
+                result = result[:max_per_feed]
+                logger.info(f"  Capped to {max_per_feed} articles per feed")
 
         elif name == "fetch_article_text":
             if article_fetch_count[0] >= MAX_ARTICLES_TO_FETCH:
@@ -308,6 +318,7 @@ def run_agent(
     feeds: list,
     recipient: str,
     model: str = "claude-haiku-4-5-20251001",
+    max_per_feed: int = MAX_ARTICLES_PER_FEED,
 ) -> dict:
     """
     Run the bounded agent loop and return a validated output dict.
@@ -320,6 +331,9 @@ def run_agent(
         Email address the digest will be sent to (passed to Claude for context).
     model : str
         Claude model ID to use.
+    max_per_feed : int
+        Maximum number of articles to forward to Claude per RSS feed.
+        Keeps token usage predictable regardless of how many feeds are configured.
 
     Returns
     -------
@@ -424,7 +438,7 @@ def run_agent(
                     f"({', '.join(f'{k}={str(v)[:60]!r}' for k, v in args.items())})"
                 )
 
-                result_str = _execute_tool(name, args, article_fetch_count)
+                result_str = _execute_tool(name, args, article_fetch_count, max_per_feed)
 
                 tool_results.append(
                     {

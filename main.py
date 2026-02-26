@@ -75,7 +75,8 @@ def _run_agent(config: dict) -> None:
     from ai.tools import send_email_html         # noqa: PLC0415
     from ai.email_template import render_html    # noqa: PLC0415
 
-    output = run_agent(feeds=feeds, recipient=recipient, model=model)
+    max_per_feed = int((config.get("ai") or {}).get("max_per_feed", 5))
+    output = run_agent(feeds=feeds, recipient=recipient, model=model, max_per_feed=max_per_feed)
     html   = render_html(output)
 
     result = send_email_html(
