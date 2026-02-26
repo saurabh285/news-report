@@ -7,6 +7,7 @@ Requires ANTHROPIC_API_KEY, GMAIL_USER, and GMAIL_APP_PASSWORD to be set.
 
 import logging
 import os
+import sys
 
 import yaml
 
@@ -94,12 +95,13 @@ def main() -> None:
         config = load_config()
     except Exception as exc:
         logger.error(f"Failed to load config: {exc}")
-        return
+        sys.exit(1)
 
     try:
         _run_agent(config)
     except Exception as exc:
-        logger.error(f"Agent failed ({type(exc).__name__}: {exc})")
+        logger.error(f"Agent failed ({type(exc).__name__}: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
