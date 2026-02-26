@@ -1,15 +1,22 @@
 """
-ai/agent_runner.py — Bounded tool-calling agent loop.
+ai/agent_runner.py
 
-The agent is given four tools (fetch_rss, fetch_article_text, dedupe, rank).
-It calls them in whatever order it chooses, then returns a final JSON object
-that satisfies the output contract below.
+Pipeline
+--------
+All data-plumbing steps run in Python (no tool-calling loop):
+  1. Fetch RSS feeds          → ai/tools.py fetch_rss()
+  2. Dedupe + rank            → ai/tools.py dedupe() / rank()
+  3. Fetch article text       → ai/tools.py fetch_article_text()
+  4. Call Claude ONCE         → write the structured digest
+
+Giving Claude pre-processed article text avoids the token-limit problem
+that occurs when Claude has to echo back large JSON payloads in tool calls.
 
 Output contract (strict JSON from Claude):
 {
     "subject":   str,
-    "themes":    [str, str, str],           # exactly 3 themes
-    "items":     [                          # 1–10 articles
+    "themes":    [str, str, str],
+    "items": [
         {
             "title":          str,
             "url":            str,
@@ -17,14 +24,8 @@ Output contract (strict JSON from Claude):
             "why_it_matters": str
         }
     ],
-    "html_body": str                        # full HTML email body
+    "html_body": str          # ignored — ai/email_template.py renders the HTML
 }
-
-Guardrails
-----------
-MAX_TOOL_CALLS       = 30   hard cap on total tool invocations
-MAX_ARTICLES_TO_FETCH = 40  fetch_article_text is skipped after this many calls
-AGENT_TIMEOUT_S      = 300  wall-clock seconds before TimeoutError
 """
 
 import json
@@ -41,125 +42,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Guardrails
 # ---------------------------------------------------------------------------
-MAX_TOOL_CALLS = 30
-MAX_ARTICLES_TO_FETCH = 40
-AGENT_TIMEOUT_S = 300  # 5 minutes
-
-# How many articles to return per RSS feed.  Keeping this small prevents
-# Claude's tool-call responses from blowing the output token limit when many
-# feeds are configured.  Users can add as many feeds as they like; only the
-# freshest N articles from each feed are forwarded to Claude.
-MAX_ARTICLES_PER_FEED = 2
-
-# Article text is truncated to this many characters before being returned to
-# Claude.  Keeping this well below 8 000 chars keeps per-call token costs low
-# while still giving the model enough context to write meaningful bullets.
-MAX_ARTICLE_TEXT_CHARS = 7_000
-
-# ---------------------------------------------------------------------------
-# Tool schemas (JSON Schema format required by the Anthropic API)
-# ---------------------------------------------------------------------------
-TOOL_SCHEMAS: list = [
-    {
-        "name": "fetch_rss",
-        "description": (
-            "Fetch and parse an RSS or Atom feed URL. "
-            "Returns a list of article objects each containing: "
-            "title (str), url (str), published_ts (int Unix timestamp), source (str)."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "source_url": {
-                    "type": "string",
-                    "description": "The RSS/Atom feed URL to fetch.",
-                }
-            },
-            "required": ["source_url"],
-        },
-    },
-    {
-        "name": "fetch_article_text",
-        "description": (
-            "Download a news article URL and extract its readable text content. "
-            "Returns {url, text, extracted_ok}. "
-            "Call this only for articles you intend to include in the digest."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The article URL to download and extract.",
-                }
-            },
-            "required": ["url"],
-        },
-    },
-    {
-        "name": "dedupe",
-        "description": (
-            "Remove duplicate articles by canonicalized URL "
-            "(also strips common tracking parameters such as utm_*). "
-            "Pass the full combined list; receive back a deduplicated list."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "description": "List of article objects that must each have a 'url' field.",
-                    "items": {"type": "object"},
-                }
-            },
-            "required": ["items"],
-        },
-    },
-    {
-        "name": "rank",
-        "description": (
-            "Rank article objects by recency-decay score (most recent first) "
-            "and return the top top_k articles. "
-            "Each article must have a 'published_ts' (Unix timestamp int) field."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "description": "List of article objects to rank.",
-                    "items": {"type": "object"},
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": "How many top articles to return (default 10).",
-                    "default": 10,
-                },
-            },
-            "required": ["items"],
-        },
-    },
-]
+MAX_ARTICLES_PER_FEED  = 5       # articles kept per feed before dedup/rank
+MAX_ARTICLE_TEXT_CHARS = 7_000   # characters of article body sent to Claude
+AGENT_TIMEOUT_S        = 300     # wall-clock timeout for the whole run
 
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """You are an expert news curator agent. Your job is to produce a \
-high-quality daily news digest email.
+SYSTEM_PROMPT = """You are an expert news curator. You will be given a list of \
+today's news articles (title, URL, and body text). Your job is to write a \
+high-quality daily digest.
 
-Workflow
---------
-1. Call fetch_rss once for each feed URL the user provides.
-2. Merge all returned article lists into one combined list.
-3. Call dedupe on the combined list to remove duplicates.
-4. Call rank with top_k=10 to get the 10 most-recent articles.
-5. For each of those 10 articles call fetch_article_text to get the full text.
-6. Synthesise the content and compose the digest.
-
-Final output
-------------
-When you are ready, respond with ONLY a JSON object — no markdown fences, \
-no prose before or after it — that exactly matches this schema:
+Return ONLY a JSON object — no markdown fences, no prose before or after — \
+that exactly matches this schema:
 
 {
   "subject":   "Daily News Digest — YYYY-MM-DD",
@@ -172,90 +67,32 @@ no prose before or after it — that exactly matches this schema:
       "why_it_matters": "One crisp sentence on significance."
     }
   ],
-  "html_body": "<html>...</html>"
+  "html_body": ""
 }
 
 Rules:
-- "themes" must be exactly 3 strings identifying the top recurring themes.
-- "items" must contain between 5 and 10 objects (aim for 10).
-- Each item must have exactly 3 bullets.
-- "html_body" must be a complete, self-contained HTML document styled for \
-  email clients (inline CSS only, no external resources). \
-  Include a header with today's date, the three themes as a short list, \
-  then each article as a card with its title (linked), why_it_matters in \
-  italics, and the three bullets.
-"""
+- "themes"  — exactly 3 strings identifying the top recurring themes.
+- "items"   — one entry per article provided; aim for all of them (up to 10).
+- "bullets" — exactly 3 concise bullet points per article.
+- "html_body" — leave as an empty string; the email template handles HTML.
+- Write for a smart, busy reader. Be specific, not vague."""
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Output helpers
 # ---------------------------------------------------------------------------
-
-def _execute_tool(name: str, args: dict, article_fetch_count: list,
-                  max_per_feed: int = MAX_ARTICLES_PER_FEED) -> str:
-    """Dispatch a tool call and return the result serialised as a JSON string."""
-    try:
-        if name == "fetch_rss":
-            result = T.fetch_rss(args["source_url"])
-            if len(result) > max_per_feed:
-                result = result[:max_per_feed]
-                logger.info(f"  Capped to {max_per_feed} articles per feed")
-
-        elif name == "fetch_article_text":
-            if article_fetch_count[0] >= MAX_ARTICLES_TO_FETCH:
-                result = {
-                    "url": args.get("url", ""),
-                    "text": "",
-                    "extracted_ok": False,
-                    "error": (
-                        f"Skipped: MAX_ARTICLES_TO_FETCH ({MAX_ARTICLES_TO_FETCH}) reached. "
-                        "Use text from RSS summary or title instead."
-                    ),
-                }
-            else:
-                result = T.fetch_article_text(args["url"])
-                article_fetch_count[0] += 1
-                # Truncate article text to keep token costs low for cheap models
-                if result.get("text") and len(result["text"]) > MAX_ARTICLE_TEXT_CHARS:
-                    result = {
-                        **result,
-                        "text": result["text"][:MAX_ARTICLE_TEXT_CHARS] + " … [truncated]",
-                    }
-                    logger.debug(
-                        f"  Article text truncated to {MAX_ARTICLE_TEXT_CHARS} chars"
-                    )
-
-        elif name == "dedupe":
-            result = T.dedupe(args["items"])
-
-        elif name == "rank":
-            result = T.rank(args["items"], args.get("top_k", 10))
-
-        else:
-            result = {"error": f"Unknown tool: {name!r}"}
-
-        return json.dumps(result, default=str)
-
-    except Exception as exc:
-        logger.error(f"Tool '{name}' raised an exception: {exc}")
-        return json.dumps({"error": str(exc)})
-
 
 def _extract_json(text: str) -> dict:
-    """
-    Extract the first valid top-level JSON object from ``text``.
-
-    Tries the whole string first, then falls back to a regex search for
-    the outermost ``{...}`` block.
-    """
+    """Extract the first valid JSON object from Claude's response text."""
     stripped = text.strip()
-    # Fast path: the whole response is already JSON
+
+    # Fast path: whole response is JSON
     try:
         return json.loads(stripped)
     except json.JSONDecodeError:
         pass
 
-    # Strip optional markdown code fences
+    # Strip markdown fences
     fenced = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.MULTILINE)
     fenced = re.sub(r"\s*```$", "", fenced, flags=re.MULTILINE)
     try:
@@ -263,7 +100,7 @@ def _extract_json(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Last resort: grab the outermost {...}
+    # Last resort: grab outermost { ... }
     match = re.search(r"\{[\s\S]*\}", stripped)
     if match:
         try:
@@ -272,42 +109,31 @@ def _extract_json(text: str) -> dict:
             pass
 
     raise ValueError(
-        "Claude's final response did not contain a valid JSON object.\n"
-        f"Response preview: {text[:300]!r}"
+        "Claude's response did not contain a valid JSON object.\n"
+        f"Preview: {text[:300]!r}"
     )
 
 
 def _validate_output(data: dict) -> None:
     """Raise ValueError if the output contract is not satisfied."""
-    required_keys = ("subject", "themes", "items", "html_body")
-    for key in required_keys:
+    for key in ("subject", "themes", "items", "html_body"):
         if key not in data:
             raise ValueError(f"Output contract violated: missing key {key!r}")
 
     themes = data["themes"]
     if not isinstance(themes, list) or not (1 <= len(themes) <= 5):
-        raise ValueError(
-            f"'themes' must be a list of 1–5 strings, got {themes!r}"
-        )
+        raise ValueError(f"'themes' must be a list of 1–5 strings, got {themes!r}")
 
     items = data["items"]
-    if not isinstance(items, list) or not (1 <= len(items) <= 10):
-        raise ValueError(
-            f"'items' must be a list of 1–10 article dicts, got {len(items) if isinstance(items, list) else type(items)}"
-        )
+    if not isinstance(items, list) or len(items) < 1:
+        raise ValueError("'items' must be a non-empty list")
 
     for idx, item in enumerate(items):
         for field in ("title", "url", "bullets", "why_it_matters"):
             if field not in item:
-                raise ValueError(f"items[{idx}] is missing field {field!r}")
-        bullets = item["bullets"]
-        if not isinstance(bullets, list) or not (1 <= len(bullets) <= 5):
-            raise ValueError(
-                f"items[{idx}]['bullets'] must be a list of 1–5 strings"
-            )
-
-    if not data.get("html_body", "").strip():
-        raise ValueError("'html_body' must not be empty")
+                raise ValueError(f"items[{idx}] missing field {field!r}")
+        if not isinstance(item["bullets"], list) or len(item["bullets"]) < 1:
+            raise ValueError(f"items[{idx}]['bullets'] must be a non-empty list")
 
 
 # ---------------------------------------------------------------------------
@@ -321,148 +147,105 @@ def run_agent(
     max_per_feed: int = MAX_ARTICLES_PER_FEED,
 ) -> dict:
     """
-    Run the bounded agent loop and return a validated output dict.
+    Run the news digest pipeline and return a validated output dict.
+
+    Steps 1–3 run entirely in Python. Step 4 makes a single Claude API call.
 
     Parameters
     ----------
     feeds : list[str]
         RSS feed URLs to aggregate.
     recipient : str
-        Email address the digest will be sent to (passed to Claude for context).
+        Destination email address (used in the user message for context).
     model : str
-        Claude model ID to use.
+        Claude model ID.
     max_per_feed : int
-        Maximum number of articles to forward to Claude per RSS feed.
-        Keeps token usage predictable regardless of how many feeds are configured.
+        Max articles to keep per feed before dedup/rank.
 
     Returns
     -------
-    dict
-        Validated output matching the contract (subject, themes, items, html_body).
-
-    Raises
-    ------
-    RuntimeError
-        When ANTHROPIC_API_KEY is missing or the anthropic package is absent.
-    TimeoutError
-        When the agent loop exceeds AGENT_TIMEOUT_S seconds.
-    ValueError
-        When Claude's final output fails contract validation.
+    dict  with keys: subject, themes, items, html_body
     """
-    start_time = time.monotonic()
-    tool_calls_made = 0
-    article_fetch_count = [0]  # mutable list so _execute_tool can mutate it
-
+    start = time.monotonic()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # ── Step 1: Fetch RSS feeds ────────────────────────────────────────────
+    logger.info(f"Step 1/4 — Fetching {len(feeds)} RSS feed(s) (max {max_per_feed}/feed)")
+    all_articles: list = []
+    for feed_url in feeds:
+        try:
+            articles = T.fetch_rss(feed_url)
+            kept = articles[:max_per_feed]
+            all_articles.extend(kept)
+            logger.info(f"  {feed_url}: {len(articles)} entries → kept {len(kept)}")
+        except Exception as exc:
+            logger.warning(f"  Skipping feed {feed_url}: {exc}")
+
+    if not all_articles:
+        raise RuntimeError("No articles collected from any feed.")
+
+    # ── Step 2: Dedupe + rank ──────────────────────────────────────────────
+    logger.info("Step 2/4 — Deduplicating and ranking")
+    deduped = T.dedupe(all_articles)
+    ranked  = T.rank(deduped, top_k=10)
+    logger.info(f"  {len(all_articles)} → {len(deduped)} after dedup → top {len(ranked)}")
+
+    # ── Step 3: Fetch article text ─────────────────────────────────────────
+    logger.info("Step 3/4 — Fetching article text")
+    for art in ranked:
+        result = T.fetch_article_text(art["url"])
+        text   = result.get("text") or ""
+        if len(text) > MAX_ARTICLE_TEXT_CHARS:
+            text = text[:MAX_ARTICLE_TEXT_CHARS] + " … [truncated]"
+        art["text"] = text
+
+    with_text = sum(1 for a in ranked if a.get("text"))
+    logger.info(f"  {with_text}/{len(ranked)} articles have extractable text")
+
+    # ── Step 4: Single Claude call to write the digest ────────────────────
+    logger.info(f"Step 4/4 — Calling Claude ({model}) to write digest")
+
+    elapsed = time.monotonic() - start
+    if elapsed > AGENT_TIMEOUT_S:
+        raise TimeoutError(f"Pipeline timed out before Claude call ({elapsed:.0f}s)")
+
+    article_blocks = []
+    for i, art in enumerate(ranked, 1):
+        body = art.get("text") or "(article text unavailable — use title only)"
+        article_blocks.append(
+            f"=== Article {i} ===\n"
+            f"Title: {art['title']}\n"
+            f"URL:   {art['url']}\n\n"
+            f"{body}"
+        )
+
     user_message = (
         f"Today is {today}. "
-        f"Create a top-10 daily news digest from these RSS feeds: {feeds}. "
-        f"The digest will be emailed to: {recipient}."
+        f"Write a digest for the {len(ranked)} articles below. "
+        f"It will be emailed to: {recipient}.\n\n"
+        + "\n\n".join(article_blocks)
     )
 
-    messages: list = [{"role": "user", "content": user_message}]
-
-    logger.info(
-        f"Agent loop starting — model={model}, "
-        f"MAX_TOOL_CALLS={MAX_TOOL_CALLS}, "
-        f"MAX_ARTICLES_TO_FETCH={MAX_ARTICLES_TO_FETCH}, "
-        f"timeout={AGENT_TIMEOUT_S}s"
+    response = call_claude(
+        messages=[{"role": "user", "content": user_message}],
+        system=SYSTEM_PROMPT,
+        model=model,
+        max_tokens=8192,
     )
 
-    while True:
-        # ── Guardrail: wall-clock timeout ──────────────────────────────────
-        elapsed = time.monotonic() - start_time
-        if elapsed > AGENT_TIMEOUT_S:
-            raise TimeoutError(
-                f"Agent timed out after {elapsed:.0f}s "
-                f"(limit {AGENT_TIMEOUT_S}s)."
-            )
-
-        # ── Guardrail: tool-call budget ─────────────────────────────────────
-        if tool_calls_made >= MAX_TOOL_CALLS:
-            raise RuntimeError(
-                f"Agent exceeded MAX_TOOL_CALLS={MAX_TOOL_CALLS} without "
-                "producing a final answer."
-            )
-
-        # ── Call Claude ─────────────────────────────────────────────────────
-        response = call_claude(
-            messages=messages,
-            tools=TOOL_SCHEMAS,
-            system=SYSTEM_PROMPT,
-            model=model,
-            max_tokens=4096,
-        )
-
-        stop_reason = response.stop_reason
-        logger.info(
-            f"  Claude turn: stop_reason={stop_reason!r}, "
-            f"tool_calls_so_far={tool_calls_made}, "
-            f"articles_fetched={article_fetch_count[0]}, "
-            f"elapsed={elapsed:.1f}s"
-        )
-
-        # ── End turn: parse and validate final JSON ──────────────────────────
-        if stop_reason == "end_turn":
-            text_parts = [
-                block.text
-                for block in response.content
-                if hasattr(block, "text")
-            ]
-            full_text = "\n".join(text_parts)
-            logger.info("Agent returned end_turn — parsing output JSON")
-            output = _extract_json(full_text)
-            _validate_output(output)
-            logger.info(
-                f"Agent completed successfully: "
-                f"{len(output['items'])} items, "
-                f"{tool_calls_made} tool calls, "
-                f"{elapsed:.1f}s elapsed"
-            )
-            return output
-
-        # ── Tool use: execute each tool call, collect results ───────────────
-        if stop_reason == "tool_use":
-            tool_results: list = []
-            for block in response.content:
-                if not hasattr(block, "type") or block.type != "tool_use":
-                    continue
-
-                tool_calls_made += 1
-                name: str = block.name
-                args: dict = block.input
-                tool_id: str = block.id
-
-                logger.info(
-                    f"  → Tool #{tool_calls_made}: {name}"
-                    f"({', '.join(f'{k}={str(v)[:60]!r}' for k, v in args.items())})"
-                )
-
-                result_str = _execute_tool(name, args, article_fetch_count, max_per_feed)
-
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": result_str,
-                    }
-                )
-
-            # Append assistant turn and tool results before looping
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append({"role": "user", "content": tool_results})
-            continue
-
-        # ── Output token limit hit ───────────────────────────────────────────
-        if stop_reason == "max_tokens":
-            raise RuntimeError(
-                "Claude hit the max_tokens output limit mid-response. "
-                "The RSS feeds may be returning too many articles. "
-                "Try reducing the number of feeds in config.yaml, or "
-                "increase max_tokens in ai/claude_client.py."
-            )
-
-        # ── Unexpected stop reason ───────────────────────────────────────────
+    if response.stop_reason == "max_tokens":
         raise RuntimeError(
-            f"Unexpected stop_reason from Claude: {stop_reason!r}"
+            "Claude hit the output token limit while writing the digest. "
+            "Try reducing max_per_feed in config.yaml."
         )
+
+    text_parts = [b.text for b in response.content if hasattr(b, "text")]
+    output = _extract_json("\n".join(text_parts))
+    _validate_output(output)
+
+    elapsed = time.monotonic() - start
+    logger.info(
+        f"Done — {len(output['items'])} items in digest, "
+        f"{elapsed:.1f}s total, model={model}"
+    )
+    return output
