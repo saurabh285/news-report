@@ -24,18 +24,23 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Default (cheapest / free-tier) model per provider.
+# Default (cheapest / free-tier) model per provider.  These values are
+# used when neither the per-provider MODEL env var nor config.yaml
+# ai.model override is provided.
 _DEFAULTS: dict[str, str] = {
     "gemini":    "gemini-1.5-flash",
-    # "anthropic": "claude-haiku-4-5-20251001",
-    # "openai":    "gpt-4o-mini",
+    "anthropic": "claude-haiku-4-5-20251001",
+    "openai":    "gpt-4o-mini",
 }
 
-# Environment variable that holds the API key for each provider.
+# Environment variable that holds the API key for each provider.  The
+# resolve_provider() auto-detection loop iterates through this mapping in
+# insertion order, so providers earlier in the dict have higher priority
+# when multiple keys are set.
 _KEY_ENVS: dict[str, str] = {
     "gemini":    "GEMINI_API_KEY",
-    # "anthropic": "ANTHROPIC_API_KEY",
-    # "openai":    "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai":    "OPENAI_API_KEY",
 }
 
 
@@ -114,6 +119,11 @@ def resolve_model(provider: str, configured: str = "") -> str:
         return configured.strip()
 
     # 3. Provider default
+    if provider not in _DEFAULTS:
+        raise RuntimeError(
+            f"Unknown provider {provider!r} passed to resolve_model. "
+            f"Expected one of: {', '.join(_DEFAULTS)}"
+        )
     default = _DEFAULTS[provider]
     logger.info(f"Using default model for {provider!r}: {default!r}")
     return default

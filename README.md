@@ -6,10 +6,23 @@ stories, summarises each one, and emails you a clean daily digest.
 Two pipelines are available — switch between them with a single line in
 `config.yaml`:
 
-| `ai.mode` | What it does | API key needed? |
-|-----------|-------------|-----------------|
-| `free` (default) | Deterministic extractive pipeline — pure Python, no external AI | No |
-| `agent` / `claude` | Tool-calling Claude agent — richer HTML digest with themes & bullets | Yes (`ANTHROPIC_API_KEY`) |
+| `ai.mode`           | What it does | API key needed? |
+|---------------------|-------------|-----------------|
+| `free` (default)    | Deterministic extractive pipeline — pure Python, no external AI | No |
+| `agent` / `llm`      | Tool-calling a cloud LLM for richer output | Yes (see below)
+
+Agent mode is provider‑agnostic; you can choose Gemini, Claude, OpenAI, or
+any other backend the code supports.  The provider is selected in priority
+order from:
+
+1. `LLM_PROVIDER` environment variable (`gemini`, `anthropic`, `openai`)
+2. `ai.provider` in `config.yaml`
+3. Auto‑detect from which API key is set (`GEMINI_API_KEY`,
+   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
+
+If no provider can be determined, the program exits with a helpful error
+message.  The `agent` pipeline will fall back automatically to free mode if
+the configured provider fails or the API key is missing.
 
 Agent mode **falls back automatically** to free mode if the API key is
 missing or if the agent errors or times out.
@@ -133,60 +146,74 @@ python main.py
 
 ## Agent mode (optional)
 
-Agent mode uses the Claude API to produce a richer HTML digest with:
+Agent mode uses a cloud LLM via the provider‑agnostic interface defined in
+`ai/llm_client.py`.  At the time of writing the supported providers are
+**gemini** (Google Gemini free tier), **anthropic** (Claude), and **openai**
+(GPT).  The program automatically selects a provider based on the
+following priority:
+
+1. `LLM_PROVIDER` environment variable (`gemini`, `anthropic`, `openai`)
+2. `ai.provider` in `config.yaml`
+3. Auto‑detect from whichever API key is present (`GEMINI_API_KEY`,
+   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
+
+If no provider can be determined the run will abort with a helpful error.
+When multiple keys are set the ordering above is used, so you can override
+via `LLM_PROVIDER` even if multiple credentials exist.
+
+The LLM call returns structured JSON which the agent runner converts into a
+polished HTML digest.  Compared with free mode you get:
+
 - A curated subject line
 - 3 recurring **themes** across the day's stories
 - Per-article **bullet points** and a *why it matters* sentence
 - A fully formatted **HTML email**
 
-### Cheapest model
+### Choosing a model
 
-By default agent mode uses **`claude-haiku-3-5`** — the cheapest Claude model
-available.  A typical daily run (10 articles, ~30 tool calls) costs only a
-few cents at Haiku pricing.
-
-The model is resolved in this priority order:
+Model resolution follows this priority (per provider):
 
 | Source | How to set |
-|--------|-----------|
-| `ANTHROPIC_MODEL` env var | `export ANTHROPIC_MODEL=claude-haiku-3-5` |
-| `ai.model` in `config.yaml` | `model: claude-haiku-3-5` |
-| Built-in default | `claude-haiku-3-5` → falls back to `claude-haiku-4-5-20251001` |
+|--------|------------|
+| `{PROVIDER}_MODEL` env var | `export GEMINI_MODEL=...` (or ANTHROPIC_MODEL/OPENAI_MODEL) |
+| `ai.model` in `config.yaml` | `model: gpt-4o-mini` etc. |
+| Built-in default | cheapest free-tier model for the provider |
 
-If `ai.model` is empty, misspelled, or missing the word "claude", a warning
-is logged and the code automatically falls back to `claude-haiku-3-5`.
-
-### What you need
-
-1. An Anthropic account and API key — sign up at https://console.anthropic.com
-2. Set the environment variable:
+For example, to force Gemini even if an Anthropic key exists:
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+export LLM_PROVIDER=gemini
+export GEMINI_API_KEY=...
 ```
 
-3. Change `ai.mode` and `ai.model` in `config.yaml`:
+And in `config.yaml` you can still specify a model name if you like.
+
+### Requirements
+
+1. An API key for your chosen provider:
+   * `GEMINI_API_KEY` for Gemini (free).
+   * `ANTHROPIC_API_KEY` for Claude.
+   * `OPENAI_API_KEY` for OpenAI.
+2. Set `ai.mode` to `agent` (or `llm`) in `config.yaml`:
 
 ```yaml
 ai:
   mode: agent
-  model: claude-haiku-3-5   # cheapest model (default)
 ```
 
-4. Run as normal:
+3. (Optional) override provider or model via environment variables as
+   described above.
+
+4. Run:
 
 ```bash
 python main.py
 ```
 
-To use a more capable model for higher-quality output:
-
-```yaml
-ai:
-  mode: agent
-  model: claude-sonnet-4-6   # more capable, higher cost
-```
-
+(Optional) run the test suite with `pytest` after installing the development
+requirements.  The tests exercise configuration and error handling logic.
+If the provider-specific package is missing or the key is unset, the code
+logs a clear error and the pipeline falls back to the free mode automatically.
 Or override at runtime without touching `config.yaml`:
 
 ```bash

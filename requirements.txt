@@ -10,3 +10,6 @@ google-genai>=1.0
 anthropic>=0.25
 # OpenAI:
 openai>=1.0
+
+# development / testing
+pytest>=7.0
