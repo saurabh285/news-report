@@ -45,7 +45,16 @@ def test_run_free_pipeline(monkeypatch, tmp_path, caplog):
     assert 'email' in called
     assert config['email_recipient'] == called['email']['to']
     assert 'Daily News Digest' in called['email']['subject']
-    assert 'Hello world' in called['email']['html']
+    html = called['email']['html']
+    assert '<html' in html.lower()
+    assert 'Hello world' in html
+
+    # run again simulating a fallback situation
+    called.clear()
+    main._run_free(config, fallback=True)
+    assert 'email' in called
+    assert called['email']['subject'].startswith('[FREE MODE]')
+    assert 'Agent unavailable' in called['email']['html']
 
 
 def test_mode_selection_and_fallback(monkeypatch):
@@ -60,7 +69,7 @@ def test_mode_selection_and_fallback(monkeypatch):
         calls.append('agent')
         raise RuntimeError("boom")
 
-    def good_free(cfg):
+    def good_free(cfg, fallback: bool = False):
         calls.append('free')
 
     monkeypatch.setattr(main, '_run_agent', fail_agent)

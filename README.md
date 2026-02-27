@@ -108,9 +108,9 @@ feeds:
 email_recipient: you@example.com
 
 ai:
-  mode: free   # change to "agent" to enable Claude mode
+  mode: free   # change to "agent" (or omit for "agent") to enable LLM/agent mode
+  # provider: gemini  # only relevant when mode is agent (see docs above)
 ```
-
 ### Step 6 — Create a Gmail App Password
 
 > Regular Gmail passwords won't work. You need an **App Password**.
@@ -212,8 +212,13 @@ python main.py
 
 (Optional) run the test suite with `pytest` after installing the development
 requirements.  The tests exercise configuration and error handling logic.
-If the provider-specific package is missing or the key is unset, the code
-logs a clear error and the pipeline falls back to the free mode automatically.
+If the provider-specific package is missing or the key is unset, or if the
+LLM call fails due to quota/rate‑limit errors (e.g. 429 from Gemini free tier),
+the code logs a clear message and the pipeline falls back to the free mode
+automatically.  The free-mode output is always rendered with the same HTML
+template so the email still looks polished; when the agent is unavailable a
+banner is added to the subject line and the themes bar points out the
+fallback.
 Or override at runtime without touching `config.yaml`:
 
 ```bash

@@ -105,14 +105,15 @@ def _run_agent(config: dict) -> None:
 # Free-mode pipeline
 # ---------------------------------------------------------------------------
 
-def _run_free(config: dict) -> None:
+def _run_free(config: dict, fallback: bool = False) -> None:
     """Run a simple extractive pipeline using only Python.
 
-    The implementation mirrors the agent pipeline for fetching and
-    ranking articles, but generates a basic text summary for each article
-    and sends it as an HTML-preformatted email via :func:`ai.tools.send_email_html`.
+    When ``fallback`` is True the subject and themes are altered to
+    indicate that the agent/LLM path failed; this helps recipients know why
+    the output is less rich.
     """
     from ai.tools import fetch_rss, dedupe, rank, fetch_article_text, summarize, send_email_html  # noqa: PLC0415
+    from ai.email_template import render_html  # noqa: PLC0415
 
     feeds = config.get("feeds") or []
     if not feeds:
@@ -152,14 +153,30 @@ def _run_free(config: dict) -> None:
         art["text"] = text
         art["summary"] = summarize(text)
 
-    # Build email body
+    # Build structured output similar to agent_runner
     today = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d")
     subject = f"Daily News Digest — {today}"
-    body_lines = []
+    themes = []
+    if fallback:
+        subject = "[FREE MODE] " + subject
+        themes.append("Agent unavailable; showing simple summaries")
+
+    items = []
     for art in ranked:
-        body_lines.append(f"{art['title']}\n{art['url']}\n{art.get('summary','(no summary)')}\n")
-    body = "\n".join(body_lines)
-    html = f"<pre>{body}</pre>"
+        bullets = []
+        if art.get("summary"):
+            bullets.append(art["summary"])
+        items.append(
+            {
+                "title": art.get("title", "Untitled"),
+                "url": art.get("url", ""),
+                "bullets": bullets,
+                "why_it_matters": "",
+            }
+        )
+
+    output = {"subject": subject, "themes": themes, "items": items, "html_body": ""}
+    html = render_html(output)
 
     result = send_email_html(subject=subject, html=html, to=recipient)
     if not result["ok"]:
@@ -180,7 +197,7 @@ def main() -> None:
 
     if mode == "free":
         try:
-            _run_free(config)
+            _run_free(config, fallback=False)
         except Exception as exc:
             logger.error(f"Free-mode pipeline failed ({type(exc).__name__}: {exc})")
             sys.exit(1)
@@ -190,7 +207,7 @@ def main() -> None:
         except Exception as exc:
             logger.error(f"Agent failed ({type(exc).__name__}: {exc}) — falling back to free mode")
             try:
-                _run_free(config)
+                _run_free(config, fallback=True)
             except Exception as exc2:
                 logger.error(f"Fallback free pipeline also failed ({type(exc2).__name__}: {exc2})")
                 sys.exit(1)
