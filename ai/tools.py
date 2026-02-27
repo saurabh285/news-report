@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import smtplib
+import ssl
 import urllib.parse
 from collections import Counter
 from datetime import datetime, timezone
@@ -23,6 +24,10 @@ import trafilatura
 logger = logging.getLogger(__name__)
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+
+# Bypass Mac OS SSL certificate verify failures in older Python installs
+if hasattr(ssl, '_create_unverified_context'):
+    ssl._create_default_https_context = ssl._create_unverified_context
 
 # Query parameters that carry no semantic value and should be stripped when
 # canonicalising a URL for deduplication purposes.

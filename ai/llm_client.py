@@ -18,6 +18,7 @@ Model selection priority (per provider):
   3. Provider default (cheapest / free-tier model)
 """
 
+from __future__ import annotations
 import logging
 import os
 
