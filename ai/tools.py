@@ -164,6 +164,26 @@ def dedupe(items: list) -> list:
 # Tool: rank
 # ---------------------------------------------------------------------------
 
+def summarize(text: str, max_sentences: int = 3) -> str:
+    """Produce a very simple extractive summary.
+
+    The implementation splits on sentence-ending punctuation and returns
+    the first *max_sentences* sentences joined together.  If no sentences
+    can be detected, returns the first *max_sentences* words or the raw
+    text as a fallback.
+    """
+    if not text:
+        return ""
+    # naive sentence split
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    if len(sentences) >= max_sentences:
+        return " ".join(sentences[:max_sentences])
+    if sentences:
+        return " ".join(sentences)
+    words = text.strip().split()
+    return " ".join(words[: max_sentences * 10])
+
+
 def rank(items: list, top_k: int = 10) -> list:
     """
     Rank article dicts by recency-decay score and return the top ``top_k``.

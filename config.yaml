@@ -8,6 +8,11 @@ email_recipient: saurabh241singh@gmail.com
 
 # AI pipeline settings
 ai:
+  # mode: "agent" (default) or "free".  Free mode uses the built-in
+  # extractive summariser and does not require any API key.  Agent mode
+  # calls an LLM via the provider-agnostic interface and falls back to
+  # free mode on errors.
+  # mode: agent
   # LLM provider to use.
   # Options: gemini (default, free tier), anthropic, openai
   # Can be overridden at runtime with the LLM_PROVIDER env var.
